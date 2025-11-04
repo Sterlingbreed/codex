@@ -18,6 +18,11 @@ python trading_app.py --pair XXBTZUSD --intervals 15 60 240
 not be relied upon for actual trading without professional advice. Digital
 asset trading carries risk, and you are solely responsible for your own
 decisions.
+
+The program also offers a **paper trading** mode that simulates buying and
+selling based on the generated signals. This allows you to backtest the
+strategy on historical data using a virtual balance, without executing any real
+orders.
 """
 
 import argparse
@@ -191,6 +196,57 @@ def generate_signal(df: pd.DataFrame, ob_imbalance: float, rsi_thresh_low: int =
     return overall, {"macd": macd_sig, "rsi": rsi_sig, "orderbook": ob_sig}
 
 
+def paper_backtest(
+    df: pd.DataFrame,
+    ob_imbalance: float,
+    initial_balance: float = 10_000.0,
+    rsi_thresh_low: int = 30,
+    rsi_thresh_high: int = 70,
+) -> float:
+    """
+    Run a simple paper trading backtest on historical data using the generated signals.
+
+    The strategy buys the asset with the entire cash balance when a buy signal is
+    triggered and sells the entire position when a sell signal occurs. If no
+    position is held and the signal is hold, the balance remains in cash. This
+    function does not execute any real trades and is intended for educational
+    purposes.
+
+    Args:
+        df: DataFrame containing OHLC data with at least a 'close' column.
+        ob_imbalance: Order book imbalance metric used for signal generation.
+        initial_balance: The starting cash balance for the simulation.
+        rsi_thresh_low: RSI threshold considered oversold.
+        rsi_thresh_high: RSI threshold considered overbought.
+
+    Returns:
+        The final portfolio value after processing all available data.
+    """
+    balance = initial_balance
+    position = 0.0
+    for i in range(1, len(df)):
+        # Use data up to the current point for indicator calculation
+        sub_df = df.iloc[: i + 1].copy()
+        sub_df = compute_macd(sub_df)
+        sub_df["rsi"] = compute_rsi(sub_df)
+        signal, _ = generate_signal(sub_df, ob_imbalance, rsi_thresh_low, rsi_thresh_high)
+        price = float(sub_df["close"].iloc[-1])
+        if signal == "buy" and position == 0:
+            # Buy with all available capital
+            if price > 0:
+                position = balance / price
+                balance = 0.0
+        elif signal == "sell" and position > 0:
+            # Sell entire position
+            balance = position * price
+            position = 0.0
+        # Otherwise hold
+    # Value remaining position at last close price
+    final_price = float(df["close"].iloc[-1])
+    final_value = balance + position * final_price
+    return final_value
+
+
 def main(args: List[str] | None = None) -> None:
     """Main function to parse arguments, compute indicators and print signals."""
     parser = argparse.ArgumentParser(
@@ -213,6 +269,21 @@ def main(args: List[str] | None = None) -> None:
         type=int,
         default=None,
         help="Optional Unix timestamp to start fetching OHLC data from.",
+    )
+
+    parser.add_argument(
+        "--paper",
+        action="store_true",
+        help=(
+            "Run a paper trading simulation using the first interval provided. "
+            "The simulation buys and sells based on the generated signals using a virtual balance."
+        ),
+    )
+    parser.add_argument(
+        "--initial_balance",
+        type=float,
+        default=10_000.0,
+        help="Initial balance for paper trading simulation (default: 10000).",
     )
     ns = parser.parse_args(args)
     # Fetch order book imbalance once
@@ -249,6 +320,28 @@ def main(args: List[str] | None = None) -> None:
         "\nDisclaimer: This script is for educational purposes only. It does not execute trades and "
         "should not be taken as financial advice. Always do your own research or consult a professional before trading."
     )
+
+    # If paper mode is requested, run a backtest on the first interval
+    if ns.paper:
+        if ns.intervals:
+            sim_interval = ns.intervals[0]
+            try:
+                sim_df = fetch_ohlc(ns.pair, sim_interval, ns.since)
+                # Precompute indicators once for simulation
+                sim_df = compute_macd(sim_df)
+                sim_df["rsi"] = compute_rsi(sim_df)
+                final_val = paper_backtest(sim_df, ob_imb, ns.initial_balance)
+                print(
+                    f"\nPaper trading simulation on {sim_interval}m candles: "
+                    f"starting balance {ns.initial_balance:.2f} → final value {final_val:.2f}"
+                )
+                print(
+                    "(No real trades were executed. This backtest is for demonstration purposes only.)"
+                )
+            except Exception as exc:
+                print(f"Failed to run paper trading simulation: {exc}")
+        else:
+            print("Paper trading mode requested, but no intervals were provided.")
 
 
 if __name__ == "__main__":
